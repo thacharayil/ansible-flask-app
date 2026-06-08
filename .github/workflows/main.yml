@@ -1,38 +1,132 @@
 ---
-name: Build and Push Docker Image via Ansible
+name: Build and Test Docker Image via Ansible
 
 on:
-  push:
-    branches:
-      - master
+push:
+branches:
+- master
+
+env:
+AWS_REGION: ap-south-1
+AMI_ID: ami-0685bcc683dadb6b9
+INSTANCE_TYPE: t3.micro
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+build:
+runs-on: ubuntu-latest
 
-    steps:
+steps:
 
-      - name: Checkout Code
-        uses: actions/checkout@v4
+  - name: Checkout Code
+    uses: actions/checkout@v4
 
-      - name: Setup SSH Key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+  - name: Setup SSH Key
+    run: |
+      mkdir -p ~/.ssh
+      echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+      chmod 600 ~/.ssh/id_rsa
 
-      - name: Install Ansible
-        run: |
-          sudo apt update
-          sudo apt install -y ansible
+  - name: Configure AWS Credentials
+    uses: aws-actions/configure-aws-credentials@v4
+    with:
+      aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install Docker Collection
-        run: |
-          ansible-galaxy collection install community.docker
+  - name: Launch Build EC2
+    run: |
+      BUILD_ID=$(aws ec2 run-instances \
+        --image-id $AMI_ID \
+        --instance-type $INSTANCE_TYPE \
+        --key-name Akhil-test \
+        --security-group-ids ${{ secrets.AWS_SECURITY_GROUP_ID }} \
+        --associate-public-ip-address \
+        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=github-build}]' \
+        --query 'Instances[0].InstanceId' \
+        --output text)
 
-      - name: Run Ansible Playbook
-        working-directory: ansible/
-        run: |
-          ansible-playbook playbook.yaml \
-            -i hosts \
-            --extra-vars "docker_hub_user=${{ secrets.DOCKER_USERNAME }} docker_hub_password=${{ secrets.DOCKER_PASSWORD }} current_commit_id=${{ github.sha }}"
+      echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+
+  - name: Launch Test EC2
+    run: |
+      TEST_ID=$(aws ec2 run-instances \
+        --image-id $AMI_ID \
+        --instance-type $INSTANCE_TYPE \
+        --key-name Akhil-test \
+        --security-group-ids ${{ secrets.AWS_SECURITY_GROUP_ID }} \
+        --associate-public-ip-address \
+        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=github-test}]' \
+        --query 'Instances[0].InstanceId' \
+        --output text)
+
+      echo "TEST_ID=$TEST_ID" >> $GITHUB_ENV
+
+  - name: Wait for Instances
+    run: |
+      aws ec2 wait instance-running \
+        --instance-ids $BUILD_ID $TEST_ID
+
+      aws ec2 wait instance-status-ok \
+        --instance-ids $BUILD_ID $TEST_ID
+
+  - name: Get Public IPs
+    run: |
+      BUILD_IP=$(aws ec2 describe-instances \
+        --instance-ids $BUILD_ID \
+        --query 'Reservations[0].Instances[0].PublicIpAddress' \
+        --output text)
+
+      TEST_IP=$(aws ec2 describe-instances \
+        --instance-ids $TEST_ID \
+        --query 'Reservations[0].Instances[0].PublicIpAddress' \
+        --output text)
+
+      echo "BUILD_IP=$BUILD_IP" >> $GITHUB_ENV
+      echo "TEST_IP=$TEST_IP" >> $GITHUB_ENV
+
+  - name: Add Hosts to Known Hosts
+    run: |
+      ssh-keyscan -H $BUILD_IP >> ~/.ssh/known_hosts
+      ssh-keyscan -H $TEST_IP >> ~/.ssh/known_hosts
+
+  - name: Install Ansible
+    run: |
+      sudo apt update
+      sudo apt install -y ansible
+
+  - name: Install Docker Collection
+    run: |
+      ansible-galaxy collection install community.docker
+
+  - name: Generate Dynamic Inventory
+    working-directory: ansible
+    run: |
+      cat > hosts <<EOF
+      [build]
+      $BUILD_IP
+
+      [test]
+      $TEST_IP
+
+      [all:vars]
+      ansible_user=ec2-user
+      ansible_ssh_private_key_file=~/.ssh/id_rsa
+      EOF
+
+  - name: Verify Ansible Connectivity
+    working-directory: ansible
+    run: |
+      ansible all -i hosts -m ping
+
+  - name: Run Ansible Playbook
+    working-directory: ansible
+    run: |
+      ansible-playbook playbook.yaml \
+        -i hosts \
+        --extra-vars "
+          docker_hub_user=${{ secrets.DOCKER_USERNAME }}
+          docker_hub_password=${{ secrets.DOCKER_PASSWORD }}
+          current_commit_id=${{ github.sha }}
+        "
+
+
