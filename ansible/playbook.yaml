@@ -1,0 +1,85 @@
+---
+- name: "Building Docker Image"
+  hosts:
+    - build
+  become: true
+  vars:
+
+    packages:
+      - docker
+      - python3-pip
+
+  vars_files:
+  tasks:
+
+    - name: "Docker Installation"
+      yum:
+        name: "{{ packages }}"
+        state: present
+
+    - name: "Docker Python Module Installation"
+      pip:
+        name: "docker-py"
+        state: present
+
+    - name: "Adding Ec2-user to Docker Group"
+      user:
+        name: "ec2-user"
+        groups:
+          - docker
+        append: yes
+
+    - name: "Starting/Enabling Docker Service"
+      service:
+        name: "docker"
+        state: restarted
+        enabled: true
+
+    - name: "Creating Application Directory"
+      file:
+        path: /var/flask-application/
+        state: directory
+
+    - name: "Copying Project Directory"
+      copy:
+        src: ../application/
+        dest: /var/flask-application/
+
+    - name: "Building Docker Image"
+      community.docker.docker_image:
+        build:
+          path: /var/flask-application
+        name: thacharayil/ansible-flask-app-project
+        tag: "{{ item }}"
+        source: build
+      loop:
+        - "latest"
+        - "{{ current_commit_id }}"
+
+    - name: "Log into DockerHub"
+      community.docker.docker_login:
+        username: "{{ docker_hub_user }}"
+        password: "{{ docker_hub_password }}"
+
+    - name: "Pushing Docker Image"
+      community.docker.docker_image:
+        name: thacharayil/ansible-flask-app-project
+        tag: "{{ item }}"
+        push: true
+        source: local
+      loop:
+        - "latest"
+        - "{{ current_commit_id }}"
+
+    - name: "Deleting Docker Image"
+      community.docker.docker_image:
+        name: thacharayil/ansible-flask-app-project
+        tag: "{{ item }}"
+        state: absent
+      loop:
+        - "latest"
+        - "{{ current_commit_id }}"
+
+    - name: "Logout From DockerHub"
+      community.docker.docker_login:
+        state: absent

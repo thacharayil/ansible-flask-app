@@ -1,0 +1,2 @@
+[build]
+build-instance.thacharayil.space ansible_user="ec2-user"

@@ -1,0 +1,38 @@
+---
+name: Build and Push Docker Image via Ansible
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Install Ansible
+        run: |
+          sudo apt update
+          sudo apt install -y ansible
+
+      - name: Install Docker Collection
+        run: |
+          ansible-galaxy collection install community.docker
+
+      - name: Run Ansible Playbook
+        working-directory: ansible/
+        run: |
+          ansible-playbook playbook.yaml \
+            -i hosts \
+            --extra-vars "docker_hub_user=${{ secrets.DOCKER_USERNAME }} docker_hub_password=${{ secrets.DOCKER_PASSWORD }} current_commit_id=${{ github.sha }}"
